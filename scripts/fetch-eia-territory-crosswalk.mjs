@@ -149,6 +149,13 @@ async function downloadEIA861() {
     const res = await fetch(url, { headers })
     if (res.ok) {
       const buffer = Buffer.from(await res.arrayBuffer())
+      // Validate ZIP magic bytes (PK = 0x50 0x4B) — EIA sometimes returns an
+      // HTML redirect page with a 200 status instead of the actual zip file.
+      if (buffer.length < 4 || buffer[0] !== 0x50 || buffer[1] !== 0x4B) {
+        lastErr = `URL returned ${(buffer.length / 1024).toFixed(0)} KB of non-ZIP content (likely an HTML redirect) from ${url}`
+        console.log(`  ${lastErr} — trying next URL...`)
+        continue
+      }
       writeFileSync(ZIP_FILE, buffer)
       console.log(`  Downloaded ${(buffer.length / 1024 / 1024).toFixed(1)} MB\n`)
       return

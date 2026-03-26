@@ -31,7 +31,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: scripts/output/eia861-temp
-          key: eia861-2023
+          key: eia861-2023-v2
 
       - name: Step 1 — Fetch national Census ACS data
         run: npm run fetch-national-census -- ${{ inputs.census_api_key || secrets.CENSUS_API_KEY || '' }}
