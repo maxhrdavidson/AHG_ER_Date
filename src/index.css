@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+@theme {
+  --color-cream: #FFF8E1;
+  --color-heat-light: #FFCC80;
+  --color-heat-mid: #FF9800;
+  --color-heat-dark: #E65100;
+  --color-heat-intense: #BF360C;
+  --color-select: #1565C0;
+  --color-select-light: rgba(21, 101, 192, 0.15);
+  --color-dc-teal: #00897B;
+  --color-quilt-coral: #FF6B47;
+  --font-family-sans: "Inter", system-ui, -apple-system, sans-serif;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-family-sans);
+  -webkit-font-smoothing: antialiased;
+  background: #f8fafc;
+  color: #1e293b;
+}
+
+#root {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.mapboxgl-popup-content {
+  padding: 12px 16px !important;
+  border-radius: 8px !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15) !important;
+  font-family: var(--font-family-sans) !important;
+  font-size: 13px !important;
+  max-width: 300px !important;
+}
