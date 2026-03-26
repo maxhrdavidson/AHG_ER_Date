@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Data pipeline intermediates (large files, re-fetchable)
+scripts/output/
+
+# Editor / OS
+.DS_Store
+*.local
