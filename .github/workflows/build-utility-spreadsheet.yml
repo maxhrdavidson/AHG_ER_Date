@@ -1,0 +1,47 @@
+name: Build Utility Heating Estimates
+
+on:
+  workflow_dispatch:
+    inputs:
+      census_api_key:
+        description: 'Census API key (optional — speeds up fetch, avoids rate limits)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Cache EIA 861 zip
+        uses: actions/cache@v4
+        with:
+          path: scripts/output/eia861-temp
+          key: eia861-2023
+
+      - name: Step 1 — Fetch national Census ACS data
+        run: npm run fetch-national-census -- ${{ inputs.census_api_key || secrets.CENSUS_API_KEY || '' }}
+
+      - name: Step 2 — Fetch EIA territory crosswalk
+        run: npm run fetch-eia-crosswalk
+
+      - name: Step 3 — Build utility spreadsheet
+        run: npm run build-utility-spreadsheet
+
+      - name: Upload CSV artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: utility-heating-estimates
+          path: scripts/output/utility-heating-estimates.csv
+          retention-days: 90
