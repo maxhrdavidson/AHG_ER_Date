@@ -19,19 +19,11 @@
 import { writeFileSync, mkdirSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
+import { ALL_STATE_FIPS } from './constants.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const OUTPUT_DIR = join(__dirname, 'output')
 const CENSUS_API_BASE = 'https://api.census.gov/data/2023/acs/acs5'
-
-// All 50 states + DC (territories excluded — most lack full retail utility coverage)
-const ALL_STATE_FIPS = [
-  '01', '02', '04', '05', '06', '08', '09', '10', '11', '12', '13',
-  '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25',
-  '26', '27', '28', '29', '30', '31', '32', '33', '34', '35', '36',
-  '37', '38', '39', '40', '41', '42', '44', '45', '46', '47', '48',
-  '49', '50', '51', '53', '54', '55', '56',
-]
 
 const VARIABLES = 'B25040_001E,B25040_004E,B25024_001E,B25024_002E,B25024_003E'
 

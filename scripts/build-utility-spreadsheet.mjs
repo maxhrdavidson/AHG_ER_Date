@@ -49,45 +49,22 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const OUTPUT_DIR = join(__dirname, 'output')
 
 // ── ER Adjustment Factors (county-level from ResStock) ───────────────────────
-// Loaded from scripts/output/resstock-county-er-factors.json.
 // Falls back to ResStock state average, then national default.
 const DEFAULT_ER_FACTOR = 0.80
-let countyErFactors = {}    // 5-digit county FIPS → ER factor
-let stateErFallbacks = {}   // 2-digit state FIPS → ER factor (ResStock state avg)
 
 function loadErFactors() {
   const factorsPath = join(OUTPUT_DIR, 'resstock-county-er-factors.json')
   try {
     const data = JSON.parse(readFileSync(factorsPath, 'utf-8'))
-    countyErFactors  = data.counties       || {}
-    stateErFallbacks = data.stateFallbacks || {}
-    console.log(`Loaded ResStock ER factors: ${Object.keys(countyErFactors).length.toLocaleString()} counties, ${Object.keys(stateErFallbacks).length} state fallbacks`)
+    const counties = data.counties       || {}
+    const states   = data.stateFallbacks || {}
+    console.log(`Loaded ResStock ER factors: ${Object.keys(counties).length.toLocaleString()} counties, ${Object.keys(states).length} state fallbacks`)
+    return (fips5) => counties[fips5] ?? states[fips5.slice(0, 2)] ?? DEFAULT_ER_FACTOR
   } catch {
-    console.warn(`WARNING: ${factorsPath} not found — using built-in state defaults.`)
+    console.warn(`WARNING: resstock-county-er-factors.json not found — using ${DEFAULT_ER_FACTOR} default.`)
     console.warn('  Run: node scripts/fetch-resstock-er-factors.mjs\n')
+    return () => DEFAULT_ER_FACTOR
   }
-}
-
-function getErFactor(countyFips5) {
-  if (countyErFactors[countyFips5] !== undefined) return countyErFactors[countyFips5]
-  const stateFips2 = countyFips5.slice(0, 2)
-  if (stateErFallbacks[stateFips2] !== undefined) return stateErFallbacks[stateFips2]
-  return DEFAULT_ER_FACTOR
-}
-
-// State FIPS → 2-letter abbreviation
-const STATE_FIPS_TO_ABBR = {
-  '01': 'AL', '02': 'AK', '04': 'AZ', '05': 'AR', '06': 'CA',
-  '08': 'CO', '09': 'CT', '10': 'DE', '11': 'DC', '12': 'FL',
-  '13': 'GA', '15': 'HI', '16': 'ID', '17': 'IL', '18': 'IN',
-  '19': 'IA', '20': 'KS', '21': 'KY', '22': 'LA', '23': 'ME',
-  '24': 'MD', '25': 'MA', '26': 'MI', '27': 'MN', '28': 'MS',
-  '29': 'MO', '30': 'MT', '31': 'NE', '32': 'NV', '33': 'NH',
-  '34': 'NJ', '35': 'NM', '36': 'NY', '37': 'NC', '38': 'ND',
-  '39': 'OH', '40': 'OK', '41': 'OR', '42': 'PA', '44': 'RI',
-  '45': 'SC', '46': 'SD', '47': 'TN', '48': 'TX', '49': 'UT',
-  '50': 'VT', '51': 'VA', '53': 'WA', '54': 'WV', '55': 'WI',
-  '56': 'WY',
 }
 
 // ── CSV helpers ──────────────────────────────────────────────────────────────
@@ -130,8 +107,7 @@ async function main() {
   }
   console.log(`Loaded EIA crosswalk: ${Object.keys(countyUtilityMap).length.toLocaleString()} counties`)
 
-  // Load ResStock county-level ER factors
-  loadErFactors()
+  const getErFactor = loadErFactors()
   console.log()
 
   // ── Aggregate by (utility, state) ────────────────────────────────────────

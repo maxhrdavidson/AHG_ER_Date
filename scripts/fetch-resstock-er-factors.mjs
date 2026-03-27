@@ -124,12 +124,12 @@ async function streamResStock() {
 
         const isER = isElectricResistance(hvacType)
         const isHP = isHeatPump(hvacType)
-        if (!isER && !isHP) return   // not electrically heated — skip
+        if (!isER && !isHP) return
 
         const fips5 = gisjoinToFips5(gisjoin)
         if (!fips5 || weight <= 0) return
 
-        if (!countyData[fips5]) countyData[fips5] = { erWeight: 0, hpWeight: 0 }
+        countyData[fips5] ??= { erWeight: 0, hpWeight: 0 }
         if (isER) { countyData[fips5].erWeight += weight; erRows++ }
         else      { countyData[fips5].hpWeight += weight; hpRows++ }
 
@@ -160,36 +160,31 @@ async function main() {
 
   const countyData = await streamResStock()
 
-  // ── Build county ER factor map ─────────────────────────────────────────────
   const erFactors = {}
+  const stateSums = {}
   for (const [fips5, { erWeight, hpWeight }] of Object.entries(countyData)) {
     const total = erWeight + hpWeight
-    if (total > 0) erFactors[fips5] = Math.round((erWeight / total) * 10000) / 10000
-  }
-
-  // ── Build state-level fallbacks (average of county ER factors within state) ─
-  const stateSums = {}
-  for (const [fips5, factor] of Object.entries(erFactors)) {
+    if (total <= 0) continue
+    const factor = Math.round((erWeight / total) * 10000) / 10000
+    erFactors[fips5] = factor
     const st = fips5.slice(0, 2)
-    if (!stateSums[st]) stateSums[st] = { sum: 0, count: 0 }
+    stateSums[st] ??= { sum: 0, count: 0 }
     stateSums[st].sum += factor
     stateSums[st].count++
   }
+
   const stateFallbacks = {}
   for (const [st, { sum, count }] of Object.entries(stateSums)) {
     stateFallbacks[st] = Math.round((sum / count) * 10000) / 10000
   }
 
-  const output = { counties: erFactors, stateFallbacks }
-
-  mkdirSync(OUTPUT_DIR, { recursive: true })
   const outputPath = join(OUTPUT_DIR, 'resstock-county-er-factors.json')
-  writeFileSync(outputPath, JSON.stringify(output))
+  writeFileSync(outputPath, JSON.stringify({ counties: erFactors, stateFallbacks }))
 
   const factors = Object.values(erFactors)
   const avg = factors.reduce((a, b) => a + b, 0) / factors.length
-  const min = Math.min(...factors)
-  const max = Math.max(...factors)
+  const min = factors.reduce((a, b) => Math.min(a, b), Infinity)
+  const max = factors.reduce((a, b) => Math.max(a, b), -Infinity)
 
   console.log(`\nOutput: ${outputPath}`)
   console.log(`  ${factors.length.toLocaleString()} counties with ResStock ER data`)
