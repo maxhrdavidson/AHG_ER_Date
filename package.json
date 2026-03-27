@@ -12,6 +12,7 @@
     "fetch-grid": "node scripts/fetch-grid-data.mjs",
     "fetch-national-census": "node scripts/fetch-national-census.mjs",
     "fetch-eia-crosswalk": "node scripts/fetch-eia-territory-crosswalk.mjs",
+    "fetch-resstock": "node scripts/fetch-resstock-er-factors.mjs",
     "build-utility-spreadsheet": "node scripts/build-utility-spreadsheet.mjs"
   },
   "dependencies": {

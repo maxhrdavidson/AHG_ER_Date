@@ -5,14 +5,15 @@
  * county crosswalk to produce per-utility estimates of:
  *   - Total households
  *   - Homes using electric heat (ACS B25040_004E — includes resistance + heat pumps)
- *   - Estimated electric resistance (ER) homes (applying a state-level ER factor)
+ *   - Estimated electric resistance (ER) homes (county-level ER factor from ResStock)
  *   - Estimated existing heat pump homes
  *   - Ducted ER homes (single-family proxy — these can take a ducted HP replacement)
  *   - Non-ducted ER homes (multifamily proxy — likely mini-split territory)
  *
  * Inputs (run these first):
- *   scripts/output/national-census-data.json   (from fetch-national-census.mjs)
- *   scripts/output/eia-county-utility-map.json  (from fetch-eia-territory-crosswalk.mjs)
+ *   scripts/output/national-census-data.json        (from fetch-national-census.mjs)
+ *   scripts/output/eia-county-utility-map.json       (from fetch-eia-territory-crosswalk.mjs)
+ *   scripts/output/resstock-county-er-factors.json  (from fetch-resstock-er-factors.mjs)
  *
  * Output:
  *   scripts/output/utility-heating-estimates.csv
@@ -29,18 +30,15 @@
  * ER ADJUSTMENT FACTOR: The Census ACS "electric heat" variable (B25040_004E)
  *   counts homes where electricity is the PRIMARY heating fuel. This includes BOTH
  *   electric resistance heaters AND heat pumps. The ER factor estimates what share
- *   is actually resistance. It varies by state/region:
- *   - Southeast: lower (30–50% of electric-heated homes already have heat pumps)
- *   - Northeast/Pacific NW: higher (legacy resistance stock, newer HP adoption)
- *   Source: NREL ResStock analysis + DOE LEAD data
+ *   is actually resistance. Sourced from NREL ResStock 2024.2 at the county level.
+ *   Falls back to a ResStock-derived state average for counties with insufficient
+ *   ResStock coverage, then to a national default of 0.80.
  *
  * DUCTED vs NON-DUCTED: Approximated using the share of single-family detached +
  *   attached housing units (Census B25024_002E + B25024_003E). Single-family homes
  *   are more likely to have ductwork for a central HP; multifamily units are more
  *   likely to use mini-split (ductless) systems. This is a structural proxy, not a
- *   direct HVAC survey. For more precision, use NREL ResStock's in.hvac_heating_type
- *   field which directly identifies "Electric Resistance Furnace" (ducted) vs
- *   "Electric Baseboard" (non-ducted).
+ *   direct HVAC survey.
  */
 
 import { readFileSync, writeFileSync, mkdirSync } from 'fs'
@@ -50,29 +48,31 @@ import { fileURLToPath } from 'url'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const OUTPUT_DIR = join(__dirname, 'output')
 
-// ── ER Adjustment Factors by State ──────────────────────────────────────────
-// What fraction of Census "electric heat" homes actually use resistance heating
-// (vs. heat pumps already installed). To update these, reference:
-//   - NREL ResStock: in.hvac_heating_type aggregated by state/county
-//   - DOE LEAD Tool: electric resistance vs HP share by geography
-const ER_FACTOR_BY_STATE = {
-  // Southeast: historically high heat pump penetration for cooling-primary climate
-  FL: 0.50,
-  GA: 0.58, SC: 0.60, NC: 0.63,
-  VA: 0.65, TN: 0.65, AL: 0.65, MS: 0.67, AR: 0.68, LA: 0.68,
-  KY: 0.70, WV: 0.72,
-  // Mid-Atlantic
-  MD: 0.72, DE: 0.70, DC: 0.72,
-  // New England: growing HP market but large legacy resistance stock
-  CT: 0.82, RI: 0.82, MA: 0.83, NH: 0.84, ME: 0.85, VT: 0.85,
-  // Pacific Northwest
-  OR: 0.80, WA: 0.80,
-  // All other states use the default below
-}
+// ── ER Adjustment Factors (county-level from ResStock) ───────────────────────
+// Loaded from scripts/output/resstock-county-er-factors.json.
+// Falls back to ResStock state average, then national default.
 const DEFAULT_ER_FACTOR = 0.80
+let countyErFactors = {}    // 5-digit county FIPS → ER factor
+let stateErFallbacks = {}   // 2-digit state FIPS → ER factor (ResStock state avg)
 
-function getErFactor(stateAbbr) {
-  return ER_FACTOR_BY_STATE[stateAbbr] ?? DEFAULT_ER_FACTOR
+function loadErFactors() {
+  const factorsPath = join(OUTPUT_DIR, 'resstock-county-er-factors.json')
+  try {
+    const data = JSON.parse(readFileSync(factorsPath, 'utf-8'))
+    countyErFactors  = data.counties       || {}
+    stateErFallbacks = data.stateFallbacks || {}
+    console.log(`Loaded ResStock ER factors: ${Object.keys(countyErFactors).length.toLocaleString()} counties, ${Object.keys(stateErFallbacks).length} state fallbacks`)
+  } catch {
+    console.warn(`WARNING: ${factorsPath} not found — using built-in state defaults.`)
+    console.warn('  Run: node scripts/fetch-resstock-er-factors.mjs\n')
+  }
+}
+
+function getErFactor(countyFips5) {
+  if (countyErFactors[countyFips5] !== undefined) return countyErFactors[countyFips5]
+  const stateFips2 = countyFips5.slice(0, 2)
+  if (stateErFallbacks[stateFips2] !== undefined) return stateErFallbacks[stateFips2]
+  return DEFAULT_ER_FACTOR
 }
 
 // State FIPS → 2-letter abbreviation
@@ -128,7 +128,11 @@ async function main() {
     console.error(`Cannot read ${crosswalkPath}\nRun: node scripts/fetch-eia-territory-crosswalk.mjs`)
     process.exit(1)
   }
-  console.log(`Loaded EIA crosswalk: ${Object.keys(countyUtilityMap).length.toLocaleString()} counties\n`)
+  console.log(`Loaded EIA crosswalk: ${Object.keys(countyUtilityMap).length.toLocaleString()} counties`)
+
+  // Load ResStock county-level ER factors
+  loadErFactors()
+  console.log()
 
   // ── Aggregate by (utility, state) ────────────────────────────────────────
 
@@ -153,12 +157,10 @@ async function main() {
     }
 
     tractsMatched++
-    const stateAbbr   = STATE_FIPS_TO_ABBR[stateFips] || ''
-    const erFactor    = getErFactor(stateAbbr)
+    const erFactor    = getErFactor(countyFips5)   // county-level from ResStock
     const shareWeight = 1 / countyUtilityCount[countyFips5]  // split multi-utility counties equally
 
     for (const { utilityId, utilityName, state: utilityState } of utilities) {
-      // Use the tract's state for the ER factor (more accurate than the utility's primary state)
       const rowKey = `${utilityId}|${utilityState}`
 
       const weightedHH        = totalOccupied * shareWeight
