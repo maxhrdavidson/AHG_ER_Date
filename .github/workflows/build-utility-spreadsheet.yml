@@ -33,7 +33,10 @@ jobs:
       - name: Step 2 — Fetch EIA territory crosswalk
         run: npm run fetch-eia-crosswalk
 
-      - name: Step 3 — Build utility spreadsheet
+      - name: Step 3 — Fetch ResStock county ER factors
+        run: npm run fetch-resstock
+
+      - name: Step 4 — Build utility spreadsheet
         run: npm run build-utility-spreadsheet
 
       - name: Upload CSV artifact

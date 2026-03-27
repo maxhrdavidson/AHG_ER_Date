@@ -5,14 +5,15 @@
  * county crosswalk to produce per-utility estimates of:
  *   - Total households
  *   - Homes using electric heat (ACS B25040_004E — includes resistance + heat pumps)
- *   - Estimated electric resistance (ER) homes (applying a state-level ER factor)
+ *   - Estimated electric resistance (ER) homes (county-level ER factor from ResStock)
  *   - Estimated existing heat pump homes
  *   - Ducted ER homes (single-family proxy — these can take a ducted HP replacement)
  *   - Non-ducted ER homes (multifamily proxy — likely mini-split territory)
  *
  * Inputs (run these first):
- *   scripts/output/national-census-data.json   (from fetch-national-census.mjs)
- *   scripts/output/eia-county-utility-map.json  (from fetch-eia-territory-crosswalk.mjs)
+ *   scripts/output/national-census-data.json        (from fetch-national-census.mjs)
+ *   scripts/output/eia-county-utility-map.json       (from fetch-eia-territory-crosswalk.mjs)
+ *   scripts/output/resstock-county-er-factors.json  (from fetch-resstock-er-factors.mjs)
  *
  * Output:
  *   scripts/output/utility-heating-estimates.csv
@@ -29,18 +30,15 @@
  * ER ADJUSTMENT FACTOR: The Census ACS "electric heat" variable (B25040_004E)
  *   counts homes where electricity is the PRIMARY heating fuel. This includes BOTH
  *   electric resistance heaters AND heat pumps. The ER factor estimates what share
- *   is actually resistance. It varies by state/region:
- *   - Southeast: lower (30–50% of electric-heated homes already have heat pumps)
- *   - Northeast/Pacific NW: higher (legacy resistance stock, newer HP adoption)
- *   Source: NREL ResStock analysis + DOE LEAD data
+ *   is actually resistance. Sourced from NREL ResStock 2024.2 at the county level.
+ *   Falls back to a ResStock-derived state average for counties with insufficient
+ *   ResStock coverage, then to a national default of 0.80.
  *
  * DUCTED vs NON-DUCTED: Approximated using the share of single-family detached +
  *   attached housing units (Census B25024_002E + B25024_003E). Single-family homes
  *   are more likely to have ductwork for a central HP; multifamily units are more
  *   likely to use mini-split (ductless) systems. This is a structural proxy, not a
- *   direct HVAC survey. For more precision, use NREL ResStock's in.hvac_heating_type
- *   field which directly identifies "Electric Resistance Furnace" (ducted) vs
- *   "Electric Baseboard" (non-ducted).
+ *   direct HVAC survey.
  */
 
 import { readFileSync, writeFileSync, mkdirSync } from 'fs'
@@ -50,44 +48,23 @@ import { fileURLToPath } from 'url'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const OUTPUT_DIR = join(__dirname, 'output')
 
-// ── ER Adjustment Factors by State ──────────────────────────────────────────
-// What fraction of Census "electric heat" homes actually use resistance heating
-// (vs. heat pumps already installed). To update these, reference:
-//   - NREL ResStock: in.hvac_heating_type aggregated by state/county
-//   - DOE LEAD Tool: electric resistance vs HP share by geography
-const ER_FACTOR_BY_STATE = {
-  // Southeast: historically high heat pump penetration for cooling-primary climate
-  FL: 0.50,
-  GA: 0.58, SC: 0.60, NC: 0.63,
-  VA: 0.65, TN: 0.65, AL: 0.65, MS: 0.67, AR: 0.68, LA: 0.68,
-  KY: 0.70, WV: 0.72,
-  // Mid-Atlantic
-  MD: 0.72, DE: 0.70, DC: 0.72,
-  // New England: growing HP market but large legacy resistance stock
-  CT: 0.82, RI: 0.82, MA: 0.83, NH: 0.84, ME: 0.85, VT: 0.85,
-  // Pacific Northwest
-  OR: 0.80, WA: 0.80,
-  // All other states use the default below
-}
+// ── ER Adjustment Factors (county-level from ResStock) ───────────────────────
+// Falls back to ResStock state average, then national default.
 const DEFAULT_ER_FACTOR = 0.80
 
-function getErFactor(stateAbbr) {
-  return ER_FACTOR_BY_STATE[stateAbbr] ?? DEFAULT_ER_FACTOR
-}
-
-// State FIPS → 2-letter abbreviation
-const STATE_FIPS_TO_ABBR = {
-  '01': 'AL', '02': 'AK', '04': 'AZ', '05': 'AR', '06': 'CA',
-  '08': 'CO', '09': 'CT', '10': 'DE', '11': 'DC', '12': 'FL',
-  '13': 'GA', '15': 'HI', '16': 'ID', '17': 'IL', '18': 'IN',
-  '19': 'IA', '20': 'KS', '21': 'KY', '22': 'LA', '23': 'ME',
-  '24': 'MD', '25': 'MA', '26': 'MI', '27': 'MN', '28': 'MS',
-  '29': 'MO', '30': 'MT', '31': 'NE', '32': 'NV', '33': 'NH',
-  '34': 'NJ', '35': 'NM', '36': 'NY', '37': 'NC', '38': 'ND',
-  '39': 'OH', '40': 'OK', '41': 'OR', '42': 'PA', '44': 'RI',
-  '45': 'SC', '46': 'SD', '47': 'TN', '48': 'TX', '49': 'UT',
-  '50': 'VT', '51': 'VA', '53': 'WA', '54': 'WV', '55': 'WI',
-  '56': 'WY',
+function loadErFactors() {
+  const factorsPath = join(OUTPUT_DIR, 'resstock-county-er-factors.json')
+  try {
+    const data = JSON.parse(readFileSync(factorsPath, 'utf-8'))
+    const counties = data.counties       || {}
+    const states   = data.stateFallbacks || {}
+    console.log(`Loaded ResStock ER factors: ${Object.keys(counties).length.toLocaleString()} counties, ${Object.keys(states).length} state fallbacks`)
+    return (fips5) => counties[fips5] ?? states[fips5.slice(0, 2)] ?? DEFAULT_ER_FACTOR
+  } catch {
+    console.warn(`WARNING: resstock-county-er-factors.json not found — using ${DEFAULT_ER_FACTOR} default.`)
+    console.warn('  Run: node scripts/fetch-resstock-er-factors.mjs\n')
+    return () => DEFAULT_ER_FACTOR
+  }
 }
 
 // ── CSV helpers ──────────────────────────────────────────────────────────────
@@ -128,7 +105,10 @@ async function main() {
     console.error(`Cannot read ${crosswalkPath}\nRun: node scripts/fetch-eia-territory-crosswalk.mjs`)
     process.exit(1)
   }
-  console.log(`Loaded EIA crosswalk: ${Object.keys(countyUtilityMap).length.toLocaleString()} counties\n`)
+  console.log(`Loaded EIA crosswalk: ${Object.keys(countyUtilityMap).length.toLocaleString()} counties`)
+
+  const getErFactor = loadErFactors()
+  console.log()
 
   // ── Aggregate by (utility, state) ────────────────────────────────────────
 
@@ -153,12 +133,10 @@ async function main() {
     }
 
     tractsMatched++
-    const stateAbbr   = STATE_FIPS_TO_ABBR[stateFips] || ''
-    const erFactor    = getErFactor(stateAbbr)
+    const erFactor    = getErFactor(countyFips5)   // county-level from ResStock
     const shareWeight = 1 / countyUtilityCount[countyFips5]  // split multi-utility counties equally
 
     for (const { utilityId, utilityName, state: utilityState } of utilities) {
-      // Use the tract's state for the ER factor (more accurate than the utility's primary state)
       const rowKey = `${utilityId}|${utilityState}`
 
       const weightedHH        = totalOccupied * shareWeight
