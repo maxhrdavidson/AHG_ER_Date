@@ -1,12 +1,12 @@
 /**
- * Download EIA Form 861 Service Territory data and build a county FIPS → utility crosswalk.
+ * Build a county FIPS → utility crosswalk from EIA Form 861 Service Territory data.
  *
  * EIA Form 861 reports which counties each electric utility serves. This script:
  *   1. Fetches all US county names from the Census API (to build a name→FIPS lookup)
- *   2. Downloads the EIA 861 2023 zip from eia.gov
- *   3. Extracts and parses the Service Territory xlsx worksheet
- *   4. Matches EIA county names to 5-digit county FIPS codes
- *   5. Outputs a county FIPS → utility list mapping
+ *   2. Locates the Service Territory xlsx — checking scripts/data/ for a locally
+ *      committed file before attempting a download from eia.gov
+ *   3. Matches EIA county names to 5-digit county FIPS codes
+ *   4. Outputs a county FIPS → utility list mapping
  *
  * Outputs: scripts/output/eia-county-utility-map.json
  *   { "01001": [{ utilityId, utilityName, state }], ... }
@@ -14,9 +14,13 @@
  * Usage: node scripts/fetch-eia-territory-crosswalk.mjs
  * Requires: xlsx package  (npm install)
  *
+ * To use a local EIA 861 file (recommended — avoids unreliable eia.gov downloads):
+ *   Place either the full zip  (e.g. f8612024.zip)  or the extracted
+ *   Service_Territory*.xlsx directly in scripts/data/ and commit it.
+ *   The script will use it automatically and skip the download.
+ *
  * Notes:
  *   - EIA 861 year can be changed by updating EIA_861_YEAR below
- *   - The zip is cached in scripts/output/eia861-temp/ — delete to force re-download
  *   - Some Alaska/Virginia entries may not match due to non-standard county designations
  */
 
@@ -31,9 +35,10 @@ const XLSX = require('xlsx')
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const OUTPUT_DIR = join(__dirname, 'output')
+const DATA_DIR   = join(__dirname, 'data')        // committed local files checked first
 const TEMP_DIR   = join(OUTPUT_DIR, 'eia861-temp')
 
-const EIA_861_YEAR = '2023'
+const EIA_861_YEAR = '2024'
 // EIA hosts the current year's data at zip/ and older years at archive/zip/.
 // Try both in order so the script works regardless of which location EIA uses.
 const EIA_861_URLS = [
@@ -130,95 +135,109 @@ async function buildCountyFipsLookup() {
   return lookup
 }
 
-// ─── Step 2: Download EIA 861 zip ─────────────────────────────────────────────
+// ─── Step 2+3: Locate and parse Service Territory xlsx ────────────────────────
+// Priority order:
+//   1. scripts/data/Service_Territory*.xlsx  (committed xlsx — fastest, most reliable)
+//   2. scripts/data/*.zip                    (committed zip — extracted on the fly)
+//   3. Download from eia.gov                 (fallback)
 
-async function downloadEIA861() {
+function findFile(dir, pattern) {
+  if (!existsSync(dir)) return null
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      const found = findFile(join(dir, entry.name), pattern)
+      if (found) return found
+    } else if (pattern.test(entry.name)) {
+      return join(dir, entry.name)
+    }
+  }
+  return null
+}
+
+function parseXlsx(xlsxPath) {
+  console.log(`  Using file: ${xlsxPath}`)
+  const workbook = XLSX.readFile(xlsxPath)
+  const sheetName = workbook.SheetNames.find(n => /service.territory/i.test(n))
+    || workbook.SheetNames[0]
+  console.log(`  Using sheet: "${sheetName}"`)
+  const sheet = workbook.Sheets[sheetName]
+  const rows  = XLSX.utils.sheet_to_json(sheet, { defval: '' })
+  console.log(`  ${rows.length} rows parsed\n`)
+  return rows
+}
+
+async function locateAndParseServiceTerritory() {
+  // 1. Committed xlsx in scripts/data/
+  const committedXlsx = findFile(DATA_DIR, /Service_Territory/i)
+  if (committedXlsx) {
+    console.log('[2/4] Found committed Service Territory xlsx — skipping download.')
+    console.log('[3/4] Parsing xlsx...')
+    return parseXlsx(committedXlsx)
+  }
+
+  // 2. Committed zip in scripts/data/
+  const committedZip = findFile(DATA_DIR, /f861.*\.zip$/i)
+  if (committedZip) {
+    console.log(`[2/4] Found committed zip: ${committedZip}`)
+    console.log('[3/4] Extracting Service Territory file from zip...')
+    mkdirSync(TEMP_DIR, { recursive: true })
+    try {
+      execSync(`unzip -o "${committedZip}" -d "${TEMP_DIR}"`, { stdio: 'pipe' })
+    } catch (err) {
+      const hasXlsx = readdirSync(TEMP_DIR).some(f => f.toLowerCase().endsWith('.xlsx'))
+      if (!hasXlsx) throw new Error(`unzip failed and no xlsx files extracted: ${err.message}`)
+    }
+    const xlsxPath = findFile(TEMP_DIR, /Service_Territory/i)
+    if (!xlsxPath) throw new Error('Service_Territory*.xlsx not found inside the committed zip.')
+    return parseXlsx(xlsxPath)
+  }
+
+  // 3. Download from eia.gov
   mkdirSync(TEMP_DIR, { recursive: true })
 
   if (existsSync(ZIP_FILE)) {
-    console.log(`[2/4] EIA 861 zip already cached at:\n  ${ZIP_FILE}\n  (delete to force re-download)\n`)
-    return
-  }
-
-  // EIA requires a browser-like User-Agent — plain fetch() gets 403'd
-  const headers = { 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0' }
-
-  let lastErr
-  for (const url of EIA_861_URLS) {
-    console.log(`[2/4] Trying EIA Form 861 (${EIA_861_YEAR}):\n  ${url}`)
-    const res = await fetch(url, { headers })
-    if (res.ok) {
-      const buffer = Buffer.from(await res.arrayBuffer())
-      // Validate ZIP magic bytes (PK = 0x50 0x4B) — EIA sometimes returns an
-      // HTML redirect page with a 200 status instead of the actual zip file.
-      if (buffer.length < 4 || buffer[0] !== 0x50 || buffer[1] !== 0x4B) {
-        lastErr = `URL returned ${(buffer.length / 1024).toFixed(0)} KB of non-ZIP content (likely an HTML redirect) from ${url}`
-        console.log(`  ${lastErr} — trying next URL...`)
-        continue
+    console.log(`[2/4] EIA 861 zip cached — skipping download.\n[3/4] Extracting...`)
+  } else {
+    // EIA requires a browser-like User-Agent — plain fetch() gets 403'd
+    const headers = { 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0' }
+    let lastErr
+    for (const url of EIA_861_URLS) {
+      console.log(`[2/4] Trying EIA Form 861 (${EIA_861_YEAR}):\n  ${url}`)
+      const res = await fetch(url, { headers })
+      if (res.ok) {
+        const buffer = Buffer.from(await res.arrayBuffer())
+        // Validate ZIP magic bytes (PK = 0x50 0x4B) — EIA sometimes returns an
+        // HTML redirect page with a 200 status instead of the actual zip file.
+        if (buffer.length < 4 || buffer[0] !== 0x50 || buffer[1] !== 0x4B) {
+          lastErr = `URL returned ${(buffer.length / 1024).toFixed(0)} KB of non-ZIP content (likely an HTML redirect) from ${url}`
+          console.log(`  ${lastErr} — trying next URL...`)
+          continue
+        }
+        writeFileSync(ZIP_FILE, buffer)
+        console.log(`  Downloaded ${(buffer.length / 1024 / 1024).toFixed(1)} MB\n`)
+        break
       }
-      writeFileSync(ZIP_FILE, buffer)
-      console.log(`  Downloaded ${(buffer.length / 1024 / 1024).toFixed(1)} MB\n`)
-      return
+      lastErr = `HTTP ${res.status} from ${url}`
+      console.log(`  ${lastErr} — trying next URL...`)
     }
-    lastErr = `HTTP ${res.status} from ${url}`
-    console.log(`  ${lastErr} — trying next URL...`)
+    if (!existsSync(ZIP_FILE)) {
+      throw new Error(
+        `Failed to download EIA 861 from all URLs: ${lastErr}\n` +
+        `Place the zip or Service_Territory xlsx in scripts/data/ and retry.`
+      )
+    }
   }
-  throw new Error(
-    `Failed to download EIA 861 from all URLs: ${lastErr}\n` +
-    `Download manually from https://www.eia.gov/electricity/data/eia861/ ` +
-    `and place the zip at: ${ZIP_FILE}`
-  )
-}
 
-// ─── Step 3: Extract and parse Service Territory xlsx ─────────────────────────
-
-function extractAndParseServiceTerritory() {
   console.log('[3/4] Extracting Service Territory file from zip...')
-
-  // Extract all files from the zip into the temp dir.
-  // unzip exits non-zero on warnings (e.g. duplicate files), so only rethrow
-  // if no xlsx files landed on disk.
   try {
     execSync(`unzip -o "${ZIP_FILE}" -d "${TEMP_DIR}"`, { stdio: 'pipe' })
   } catch (err) {
     const hasXlsx = readdirSync(TEMP_DIR).some(f => f.toLowerCase().endsWith('.xlsx'))
     if (!hasXlsx) throw new Error(`unzip failed and no xlsx files extracted: ${err.message}`)
   }
-
-  // Find the service territory xlsx (file name varies slightly by year)
-  function findFile(dir, pattern) {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.isDirectory()) {
-        const found = findFile(join(dir, entry.name), pattern)
-        if (found) return found
-      } else if (pattern.test(entry.name)) {
-        return join(dir, entry.name)
-      }
-    }
-    return null
-  }
-
   const xlsxPath = findFile(TEMP_DIR, /Service_Territory/i)
-  if (!xlsxPath) {
-    const allFiles = execSync(`find "${TEMP_DIR}" -name "*.xlsx"`).toString().trim()
-    throw new Error(
-      `Service_Territory*.xlsx not found in zip.\nFiles extracted:\n${allFiles}`
-    )
-  }
-  console.log(`  Found: ${xlsxPath}`)
-
-  const workbook = XLSX.readFile(xlsxPath)
-
-  // Find the service territory worksheet (some years nest it in multiple sheets)
-  const sheetName = workbook.SheetNames.find(n => /service.territory/i.test(n))
-    || workbook.SheetNames[0]
-  console.log(`  Using sheet: "${sheetName}"`)
-
-  const sheet = workbook.Sheets[sheetName]
-  const rows  = XLSX.utils.sheet_to_json(sheet, { defval: '' })
-  console.log(`  ${rows.length} rows parsed\n`)
-
-  return rows
+  if (!xlsxPath) throw new Error('Service_Territory*.xlsx not found in downloaded zip.')
+  return parseXlsx(xlsxPath)
 }
 
 // ─── Step 4: Match EIA county names to FIPS ───────────────────────────────────
@@ -308,8 +327,7 @@ async function main() {
   mkdirSync(OUTPUT_DIR, { recursive: true })
 
   const countyFipsLookup = await buildCountyFipsLookup()
-  await downloadEIA861()
-  const rows = extractAndParseServiceTerritory()
+  const rows = await locateAndParseServiceTerritory()
   const countyUtilityMap = buildCrossWalk(rows, countyFipsLookup)
 
   const outputPath = join(OUTPUT_DIR, 'eia-county-utility-map.json')
