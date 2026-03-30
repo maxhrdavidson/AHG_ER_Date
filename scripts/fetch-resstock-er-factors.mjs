@@ -95,7 +95,7 @@ function streamState(abbr, countyData) {
       }
 
       let headers = null
-      let colCounty = -1, colHvac = -1, colWeight = -1
+      let colCounty = -1, colHvac = -1, colWeight = -1, colDucts = -1
       let rows = 0
 
       const rl = createInterface({ input: res, crlfDelay: Infinity })
@@ -109,6 +109,7 @@ function streamState(abbr, countyData) {
           colCounty = headers.indexOf('in.county')
           colHvac   = headers.indexOf('in.hvac_heating_type_and_fuel')
           colWeight = headers.indexOf('weight')
+          colDucts  = headers.indexOf('in.hvac_has_ducts')  // -1 handled gracefully
           if (colCounty === -1 || colHvac === -1 || colWeight === -1) {
             reject(new Error(
               `Required columns not found in ${abbr} (need in.county, in.hvac_heating_type_and_fuel, weight).\n` +
@@ -127,9 +128,15 @@ function streamState(abbr, countyData) {
         const weight = parseFloat(fields[colWeight]) || 0
         if (!fips5 || weight <= 0) return
 
-        countyData[fips5] ??= { erWeight: 0, hpWeight: 0 }
-        if (isER) countyData[fips5].erWeight += weight
-        else      countyData[fips5].hpWeight += weight
+        countyData[fips5] ??= { erWeight: 0, hpWeight: 0, erDuctedWeight: 0 }
+        if (isER) {
+          countyData[fips5].erWeight += weight
+          if (colDucts !== -1 && /^true$/i.test(fields[colDucts])) {
+            countyData[fips5].erDuctedWeight += weight
+          }
+        } else {
+          countyData[fips5].hpWeight += weight
+        }
         rows++
       })
 
@@ -163,25 +170,42 @@ async function main() {
   }
 
   const erFactors = {}
-  const stateSums = {}
-  for (const [fips5, { erWeight, hpWeight }] of Object.entries(countyData)) {
+  const ductedFractions = {}
+  const erStateSums = {}
+  const ductedStateSums = {}
+
+  for (const [fips5, { erWeight, hpWeight, erDuctedWeight }] of Object.entries(countyData)) {
     const total = erWeight + hpWeight
     if (total <= 0) continue
-    const factor = Math.round((erWeight / total) * 10000) / 10000
-    erFactors[fips5] = factor
     const st = fips5.slice(0, 2)
-    stateSums[st] ??= { sum: 0, count: 0 }
-    stateSums[st].sum += factor
-    stateSums[st].count++
+
+    const erFactor = Math.round((erWeight / total) * 10000) / 10000
+    erFactors[fips5] = erFactor
+    erStateSums[st] ??= { sum: 0, count: 0 }
+    erStateSums[st].sum += erFactor
+    erStateSums[st].count++
+
+    if (erWeight > 0) {
+      const ductedFrac = Math.round((erDuctedWeight / erWeight) * 10000) / 10000
+      ductedFractions[fips5] = ductedFrac
+      ductedStateSums[st] ??= { sum: 0, count: 0 }
+      ductedStateSums[st].sum += ductedFrac
+      ductedStateSums[st].count++
+    }
   }
 
   const stateFallbacks = {}
-  for (const [st, { sum, count }] of Object.entries(stateSums)) {
+  for (const [st, { sum, count }] of Object.entries(erStateSums)) {
     stateFallbacks[st] = Math.round((sum / count) * 10000) / 10000
   }
 
+  const ductedFallbacks = {}
+  for (const [st, { sum, count }] of Object.entries(ductedStateSums)) {
+    ductedFallbacks[st] = Math.round((sum / count) * 10000) / 10000
+  }
+
   const outputPath = join(OUTPUT_DIR, 'resstock-county-er-factors.json')
-  writeFileSync(outputPath, JSON.stringify({ counties: erFactors, stateFallbacks }))
+  writeFileSync(outputPath, JSON.stringify({ counties: erFactors, stateFallbacks, ductedFractions, ductedFallbacks }))
 
   const factors = Object.values(erFactors)
   const avg = factors.reduce((a, b) => a + b, 0) / factors.length
@@ -189,10 +213,16 @@ async function main() {
   const max = factors.reduce((a, b) => Math.max(a, b), -Infinity)
 
   console.log(`\nTotal electric-heat rows processed: ${totalRows.toLocaleString()}`)
+  const ductedVals = Object.values(ductedFractions)
+  const dAvg = ductedVals.reduce((a, b) => a + b, 0) / ductedVals.length
+  const dMin = ductedVals.reduce((a, b) => Math.min(a, b), Infinity)
+  const dMax = ductedVals.reduce((a, b) => Math.max(a, b), -Infinity)
+
   console.log(`\nOutput: ${outputPath}`)
   console.log(`  ${factors.length.toLocaleString()} counties with ResStock ER data`)
   console.log(`  ${Object.keys(stateFallbacks).length} state fallbacks computed`)
   console.log(`  ER factor range: ${min.toFixed(2)} – ${max.toFixed(2)}  (avg: ${avg.toFixed(2)})`)
+  console.log(`  Ducted fraction range: ${dMin.toFixed(2)} – ${dMax.toFixed(2)}  (avg: ${dAvg.toFixed(2)})`)
   console.log('\nNext step: node scripts/build-utility-spreadsheet.mjs')
 }
 

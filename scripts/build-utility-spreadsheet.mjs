@@ -34,11 +34,11 @@
  *   Falls back to a ResStock-derived state average for counties with insufficient
  *   ResStock coverage, then to a national default of 0.80.
  *
- * DUCTED vs NON-DUCTED: Approximated using the share of single-family detached +
- *   attached housing units (Census B25024_002E + B25024_003E). Single-family homes
- *   are more likely to have ductwork for a central HP; multifamily units are more
- *   likely to use mini-split (ductless) systems. This is a structural proxy, not a
- *   direct HVAC survey.
+ * DUCTED vs NON-DUCTED: Sourced from NREL ResStock 2024.2 via the in.hvac_has_ducts
+ *   column. For each county, the ducted fraction is the share of simulated ER homes
+ *   that have a duct system (weighted by homes represented). Falls back to a ResStock
+ *   state average, then to the Census single-family % proxy (B25024_002E + B25024_003E
+ *   / B25024_001E) if no ResStock ducted data is available.
  */
 
 import { readFileSync, writeFileSync, mkdirSync } from 'fs'
@@ -52,18 +52,38 @@ const OUTPUT_DIR = join(__dirname, 'output')
 // Falls back to ResStock state average, then national default.
 const DEFAULT_ER_FACTOR = 0.80
 
-function loadErFactors() {
+function loadResStockData() {
   const factorsPath = join(OUTPUT_DIR, 'resstock-county-er-factors.json')
   try {
     const data = JSON.parse(readFileSync(factorsPath, 'utf-8'))
-    const counties = data.counties       || {}
-    const states   = data.stateFallbacks || {}
-    console.log(`Loaded ResStock ER factors: ${Object.keys(counties).length.toLocaleString()} counties, ${Object.keys(states).length} state fallbacks`)
-    return (fips5) => counties[fips5] ?? states[fips5.slice(0, 2)] ?? DEFAULT_ER_FACTOR
+    const erCounties     = data.counties         || {}
+    const erStates       = data.stateFallbacks   || {}
+    const ductedCounties = data.ductedFractions  || {}
+    const ductedStates   = data.ductedFallbacks  || {}
+    const hasDucted      = Object.keys(ductedCounties).length > 0
+
+    console.log(`Loaded ResStock ER factors: ${Object.keys(erCounties).length.toLocaleString()} counties, ${Object.keys(erStates).length} state fallbacks`)
+    if (hasDucted) {
+      console.log(`Loaded ResStock ducted fractions: ${Object.keys(ductedCounties).length.toLocaleString()} counties, ${Object.keys(ductedStates).length} state fallbacks`)
+    } else {
+      console.warn('WARNING: No ResStock ducted fraction data — falling back to single-family % proxy')
+    }
+
+    const getErFactor = (fips5) =>
+      erCounties[fips5] ?? erStates[fips5.slice(0, 2)] ?? DEFAULT_ER_FACTOR
+
+    const getDuctedFraction = hasDucted
+      ? (fips5, singleFamilyPct) => ductedCounties[fips5] ?? ductedStates[fips5.slice(0, 2)] ?? singleFamilyPct
+      : (_fips5, singleFamilyPct) => singleFamilyPct
+
+    return { getErFactor, getDuctedFraction }
   } catch {
     console.warn(`WARNING: resstock-county-er-factors.json not found — using ${DEFAULT_ER_FACTOR} default.`)
     console.warn('  Run: node scripts/fetch-resstock-er-factors.mjs\n')
-    return () => DEFAULT_ER_FACTOR
+    return {
+      getErFactor:       ()              => DEFAULT_ER_FACTOR,
+      getDuctedFraction: (_fips5, sfPct) => sfPct,
+    }
   }
 }
 
@@ -107,7 +127,7 @@ async function main() {
   }
   console.log(`Loaded EIA crosswalk: ${Object.keys(countyUtilityMap).length.toLocaleString()} counties`)
 
-  const getErFactor = loadErFactors()
+  const { getErFactor, getDuctedFraction } = loadResStockData()
   console.log()
 
   // ── Aggregate by (utility, state) ────────────────────────────────────────
@@ -133,8 +153,9 @@ async function main() {
     }
 
     tractsMatched++
-    const erFactor    = getErFactor(countyFips5)   // county-level from ResStock
-    const shareWeight = 1 / countyUtilityCount[countyFips5]  // split multi-utility counties equally
+    const erFactor      = getErFactor(countyFips5)
+    const ductedFrac    = getDuctedFraction(countyFips5, singleFamilyPct)
+    const shareWeight   = 1 / countyUtilityCount[countyFips5]  // split multi-utility counties equally
 
     for (const { utilityId, utilityName, state: utilityState } of utilities) {
       const rowKey = `${utilityId}|${utilityState}`
@@ -142,8 +163,8 @@ async function main() {
       const weightedHH        = totalOccupied * shareWeight
       const weightedElecHeat  = electricHeat  * shareWeight
       const weightedER        = weightedElecHeat * erFactor
-      const weightedDucted    = weightedER * singleFamilyPct
-      const weightedNonDucted = weightedER * (1 - singleFamilyPct)
+      const weightedDucted    = weightedER * ductedFrac
+      const weightedNonDucted = weightedER * (1 - ductedFrac)
 
       if (!stats[rowKey]) {
         stats[rowKey] = {
