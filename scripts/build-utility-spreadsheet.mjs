@@ -124,7 +124,7 @@ async function main() {
   let tractsUnmatched = 0
 
   for (const tract of Object.values(censusData)) {
-    const { countyFips5, stateFips, totalOccupied, electricHeat, singleFamilyPct } = tract
+    const { countyFips5, totalOccupied, electricHeat, singleFamilyPct } = tract
     const utilities = countyUtilityMap[countyFips5]
 
     if (!utilities || utilities.length === 0) {
@@ -264,7 +264,7 @@ async function main() {
   console.log(`  Total households:    ${Math.round(natHH).toLocaleString()}`)
   console.log(`  Electric heat homes: ${Math.round(natElec).toLocaleString()} (${((natElec / natHH) * 100).toFixed(1)}%)`)
   console.log(`  Estimated ER homes:  ${Math.round(natER).toLocaleString()}`)
-  console.log(`  Ducted ER homes:     ${Math.round(natDuct).toLocaleString()} (${((natDuct / natER) * 100).toFixed(1)}% of ER)`)
+  console.log(`  Ducted ER homes:     ${Math.round(natDuct).toLocaleString()}${natER > 0 ? ` (${((natDuct / natER) * 100).toFixed(1)}% of ER)` : ''}`)
   console.log(`  Non-ducted ER homes: ${Math.round(natER - natDuct).toLocaleString()}`)
 }
 

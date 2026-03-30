@@ -3,9 +3,9 @@
  *
  * Streams per-state baseline CSV files from OEDI S3 (~30 MB each, 51 states).
  * For each simulated home, reads:
- *   in.county             GISJOIN county code (G + state(2) + 0 + county(3))
- *   in.hvac_heating_type  heating system type (Electric Resistance / Heat Pump variants)
- *   weight                statistical weight (number of real homes this record represents)
+ *   in.county                    GISJOIN county code (G + state(2) + 0 + county(3))
+ *   in.hvac_heating_type_and_fuel heating system + fuel (e.g. "Electricity Baseboard", "Electricity ASHP")
+ *   weight                       statistical weight (number of real homes this record represents)
  *
  * ER factor = weighted ER homes / (weighted ER homes + weighted HP homes)
  * Only electrically-heated homes are counted (ER + HP); gas/oil/propane are skipped.
@@ -64,14 +64,19 @@ function parseCSVLine(line) {
   return fields
 }
 
-function isElectricResistance(hvacType) {
-  return /electric.?resistance/i.test(hvacType)
+function isElectricResistance(hvacTypeAndFuel) {
+  // ResStock 2024.2 metadata_and_annual_results uses in.hvac_heating_type_and_fuel.
+  // ER values: "Electricity Electric Furnace", "Electricity Baseboard",
+  //            "Electricity Electric Boiler", "Electricity Shared Heating"
+  if (!/^electricity\s/i.test(hvacTypeAndFuel)) return false
+  return !/\b(ashp|mshp|heat.?pump)\b/i.test(hvacTypeAndFuel)
 }
 
-function isHeatPump(hvacType) {
-  // Exclude dual-fuel HPs — gas is their primary fuel, not electricity
-  if (/dual.?fuel/i.test(hvacType)) return false
-  return /heat.?pump/i.test(hvacType) || /\bASHP\b/i.test(hvacType)
+function isHeatPump(hvacTypeAndFuel) {
+  // HP values: "Ducted Heat Pump", "Electricity ASHP", "Electricity MSHP"
+  // Dual-fuel HPs carry a gas prefix ("Natural Gas ...") so won't pass isElectricResistance
+  // but we still exclude them here via the "heat.?pump" catch-all check
+  return /\b(heat.?pump|ashp|mshp)\b/i.test(hvacTypeAndFuel)
 }
 
 function streamState(abbr, countyData) {
@@ -102,11 +107,11 @@ function streamState(abbr, countyData) {
         if (!headers) {
           headers = fields
           colCounty = headers.indexOf('in.county')
-          colHvac   = headers.indexOf('in.hvac_heating_type')
+          colHvac   = headers.indexOf('in.hvac_heating_type_and_fuel')
           colWeight = headers.indexOf('weight')
           if (colCounty === -1 || colHvac === -1 || colWeight === -1) {
             reject(new Error(
-              `Required columns not found in ${abbr}.\n` +
+              `Required columns not found in ${abbr} (need in.county, in.hvac_heating_type_and_fuel, weight).\n` +
               `  First 30 columns: ${headers.slice(0, 30).join(', ')}`
             ))
           }
