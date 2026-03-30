@@ -3,9 +3,9 @@
  *
  * Streams per-state baseline CSV files from OEDI S3 (~30 MB each, 51 states).
  * For each simulated home, reads:
- *   in.county             GISJOIN county code (G + state(2) + 0 + county(3))
- *   in.hvac_heating_type  heating system type (Electric Resistance / Heat Pump variants)
- *   weight                statistical weight (number of real homes this record represents)
+ *   in.county                    GISJOIN county code (G + state(2) + 0 + county(3))
+ *   in.hvac_heating_type_and_fuel heating system + fuel (e.g. "Electricity Baseboard", "Electricity ASHP")
+ *   weight                       statistical weight (number of real homes this record represents)
  *
  * ER factor = weighted ER homes / (weighted ER homes + weighted HP homes)
  * Only electrically-heated homes are counted (ER + HP); gas/oil/propane are skipped.
